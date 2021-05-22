@@ -316,7 +316,7 @@ export interface AtomicassetsWithdraw {
 
 // Added Types
 export type AtomicassetsATOMICATTRIBUTE = AtomicassetsVariantInt8Int16Int32Int64Uint8Uint16Uint32Uint64Float32Float64StringINT8VECINT16VECINT32VECINT64VECUINT8VECUINT16VECUINT32VECUINT64VECFLOATVECDOUBLEVECSTRINGVEC;
-export type AtomicassetsATTRIBUTEMAP = Array<{ key: string; value: AtomicassetsATOMICATTRIBUTE }>;
+export type AtomicassetsATTRIBUTEMAP = Array<{ first: string; second: AtomicassetsATOMICATTRIBUTE }>;
 export type AtomicassetsDOUBLEVEC = Array<string>;
 export type AtomicassetsFLOATVEC = Array<string>;
 export type AtomicassetsINT16VEC = Array<number>;
