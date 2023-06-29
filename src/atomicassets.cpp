@@ -529,6 +529,12 @@ ACTION atomicassets::mintasset(
         "The minter is not authorized within the collection"
     );
 
+    schemas_t collection_schemas = get_schemas(collection_name);
+    auto schema_itr = collection_schemas.require_find(schema_name.value,
+        "No schema with this name exists");
+
+    //Needed for the log action
+    ATTRIBUTE_MAP deserialized_template_data;
     if (template_id >= 0) {
         templates_t collection_templates = get_templates(collection_name);
 
@@ -545,13 +551,16 @@ ACTION atomicassets::mintasset(
         collection_templates.modify(template_itr, same_payer, [&](auto &_template) {
             _template.issued_supply += 1;
         });
+
+        deserialized_template_data = deserialize(
+            template_itr->immutable_serialized_data,
+            schema_itr->format
+        );
     } else {
         check(template_id == -1, "The template id must either be an existing template or -1");
-    }
 
-    schemas_t collection_schemas = get_schemas(collection_name);
-    auto schema_itr = collection_schemas.require_find(schema_name.value,
-        "No schema with this name exists");
+        deserialized_template_data = {};
+    }
 
     check(is_account(new_asset_owner), "The new_asset_owner account does not exist");
 
@@ -588,7 +597,8 @@ ACTION atomicassets::mintasset(
             new_asset_owner,
             immutable_data,
             mutable_data,
-            tokens_to_back
+            tokens_to_back,
+            deserialized_template_data
         )
     ).send();
 
@@ -596,7 +606,11 @@ ACTION atomicassets::mintasset(
     //It will throw if authorized_minter does not have a sufficient balance to pay for the backed tokens
     //Token validity must not be cross-checked with config.supported_tokens because it's implicitly checked
     //when decreasing minter's balance (only supported tokens can be deposited)
+    set <symbol> used_symbols = {};
     for (asset &token : tokens_to_back) {
+        check(used_symbols.find(token.symbol) == used_symbols.end(),
+            "Symbols in the tokens_to_back must be unique");
+        used_symbols.emplace(token.symbol);
         internal_back_asset(authorized_minter, new_asset_owner, asset_id, token);
     }
 }
@@ -785,26 +799,39 @@ ACTION atomicassets::burnasset(
         check(template_itr->burnable, "The asset is not burnable");
     };
 
-    config_s current_config = config.get();
 
-    for (asset backed_quantity : asset_itr->backed_tokens) {
-        for (extended_symbol supported_token : current_config.supported_tokens) {
-            if (supported_token.get_symbol() == backed_quantity.symbol) {
-                action(
-                    permission_level{get_self(), name("active")},
-                    supported_token.get_contract(),
-                    name("transfer"),
-                    make_tuple(
-                        get_self(),
-                        asset_owner,
-                        backed_quantity,
-                        string("Backed asset payout - ID: ") + to_string(asset_id)
-                    )
-                ).send();
-                break;
+    if (asset_itr->backed_tokens.size() != 0) {
+        auto balance_itr = balances.find(asset_owner.value);
+        if (balance_itr == balances.end()) {
+            // If the asset_owner does not have a balance table entry yet, a new one is created
+            balances.emplace(asset_owner, [&](auto &_balance) {
+                _balance.owner = asset_owner,
+                _balance.quantities = asset_itr->backed_tokens;
+            });
+        } else {
+            // Any backed tokens are added to the asset_owners balance
+            vector <asset> quantities = balance_itr->quantities;
+
+            for (asset backed_quantity : asset_itr->backed_tokens) {
+                bool found_token = false;
+                for (asset &token : quantities) {
+                    if (token.symbol == backed_quantity.symbol) {
+                        found_token = true;
+                        token.amount += backed_quantity.amount;
+                        break;
+                    }
+                }
+                if (!found_token) {
+                    quantities.push_back(backed_quantity);
+                }
             }
+
+            balances.modify(balance_itr, asset_owner, [&](auto &_balance) {
+                _balance.quantities = quantities;
+            });
         }
     }
+
 
     schemas_t collection_schemas = get_schemas(asset_itr->collection_name);
     auto schema_itr = collection_schemas.find(asset_itr->schema_name.value);
@@ -1026,7 +1053,12 @@ ACTION atomicassets::payofferram(
     auto offer_itr = offers.require_find(offer_id,
         "No offer with this id exists");
 
-    offers.modify(offer_itr, payer, [&](auto &_offer) {
+    offers_s offer_copy = *offer_itr;
+
+    offers.erase(offer_itr);
+
+    offers.emplace(payer, [&](auto &_offer) {
+        _offer = offer_copy;
         _offer.ram_payer = payer;
     });
 }
@@ -1037,7 +1069,7 @@ ACTION atomicassets::payofferram(
 *  It handels deposits and adds the transferred tokens to the sender's balance table row
 */
 void atomicassets::receive_token_transfer(name from, name to, asset quantity, string memo) {
-    if (to != _self) {
+    if (to != get_self()) {
         return;
     }
 
@@ -1130,7 +1162,8 @@ ACTION atomicassets::logmint(
     name new_asset_owner,
     ATTRIBUTE_MAP immutable_data,
     ATTRIBUTE_MAP mutable_data,
-    vector <asset> backed_tokens
+    vector <asset> backed_tokens,
+    ATTRIBUTE_MAP immutable_template_data
 ) {
     require_auth(get_self());
 
